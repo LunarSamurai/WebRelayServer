@@ -1,164 +1,139 @@
-var _type = async_load[? "type"];
-var _id = async_load[? "id"];
+const http = require('http');
+const WebSocket = require('ws');
 
-if (_id != global.ws_socket) exit;
+const PORT = process.env.PORT || 3000;
 
-switch (_type) {
-    case network_type_non_blocking_connect:
-        if (async_load[? "succeeded"]) {
-            global.ws_connected = true;
-            show_debug_message("Connected to relay server!");
-            
-            with (obj_character_menu) {
-                mp_status_message = "Connected to server";
-            }
-            
-            if (global.ws_pending_action == "create") {
-                ws_create_lobby();
-            } else if (global.ws_pending_action == "join") {
-                ws_join_lobby(global.ws_pending_code);
-            }
-            global.ws_pending_action = "";
-            global.ws_pending_code = "";
-        } else {
-            show_debug_message("Failed to connect to relay server");
-            with (obj_character_menu) {
-                mp_state = "idle";
-                mp_status_message = "Failed to connect!";
-            }
-        }
-        break;
-        
-    case network_type_data:
-        var _buffer = async_load[? "buffer"];
-        buffer_seek(_buffer, buffer_seek_start, 0);
-        var _json_str = buffer_read(_buffer, buffer_text);
-        
-        show_debug_message("Received: " + _json_str);
-        
+// Create HTTP server
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Game Relay Server Running\n');
+});
+
+// Create WebSocket server
+const wss = new WebSocket.Server({ server });
+
+const lobbies = new Map();
+
+wss.on('connection', (ws) => {
+    console.log('Client connected');
+    
+    ws.lobbyCode = null;
+    ws.playerName = '';
+    ws.isHost = false;
+    
+    ws.on('message', (data) => {
         try {
-            var _msg = json_parse(_json_str);
+            const msg = JSON.parse(data);
+            console.log('Received:', msg.type);
             
-            switch (_msg.type) {
-                case "lobby_created":
-                    global.ws_lobby_code = _msg.code;
-                    global.ws_is_host = true;
+            switch (msg.type) {
+                case 'create_lobby':
+                    const code = Math.random().toString(36).substring(2, 8).toUpperCase();
                     
-                    with (obj_character_menu) {
-                        mp_state = "hosting";
-                        mp_status_message = "Lobby created!";
-                        lobby_code = _msg.code;
-                    }
-                    show_debug_message("Lobby created: " + _msg.code);
+                    lobbies.set(code, {
+                        host: ws,
+                        guest: null,
+                        hostName: msg.name || 'Host'
+                    });
+                    
+                    ws.lobbyCode = code;
+                    ws.playerName = msg.name || 'Host';
+                    ws.isHost = true;
+                    
+                    ws.send(JSON.stringify({
+                        type: 'lobby_created',
+                        code: code
+                    }));
+                    
+                    console.log(`Lobby created: ${code}`);
                     break;
                     
-                case "join_success":
-                    global.ws_is_connected = true;
-                    global.ws_is_host = false;
+                case 'join_lobby':
+                    const lobby = lobbies.get(msg.code);
                     
-                    if (instance_exists(obj_hero)) {
-                        global.ws_other_player = instance_create_layer(obj_hero.x + 50, obj_hero.y, "Instances", obj_player_other);
-                        global.ws_other_player.player_name = _msg.hostName;
+                    if (!lobby) {
+                        ws.send(JSON.stringify({
+                            type: 'join_failed',
+                            reason: 'Lobby not found'
+                        }));
+                        return;
                     }
                     
-                    with (obj_character_menu) {
-                        mp_state = "connected";
-                        mp_status_message = "Connected!";
-                        connected_player_name = _msg.hostName;
+                    if (lobby.guest) {
+                        ws.send(JSON.stringify({
+                            type: 'join_failed',
+                            reason: 'Lobby is full'
+                        }));
+                        return;
                     }
-                    show_debug_message("Joined lobby!");
+                    
+                    lobby.guest = ws;
+                    ws.lobbyCode = msg.code;
+                    ws.playerName = msg.name || 'Guest';
+                    ws.isHost = false;
+                    
+                    ws.send(JSON.stringify({
+                        type: 'join_success',
+                        hostName: lobby.hostName
+                    }));
+                    
+                    lobby.host.send(JSON.stringify({
+                        type: 'player_joined',
+                        playerName: ws.playerName
+                    }));
+                    
+                    console.log(`Player joined lobby: ${msg.code}`);
                     break;
                     
-                case "join_failed":
-                    with (obj_character_menu) {
-                        mp_state = "idle";
-                        mp_status_message = "Failed: " + _msg.reason;
-                    }
-                    show_debug_message("Join failed: " + _msg.reason);
-                    break;
-                    
-                case "player_joined":
-                    global.ws_is_connected = true;
-                    
-                    if (instance_exists(obj_hero)) {
-                        global.ws_other_player = instance_create_layer(obj_hero.x + 50, obj_hero.y, "Instances", obj_player_other);
-                        global.ws_other_player.player_name = _msg.playerName;
-                    }
-                    
-                    with (obj_character_menu) {
-                        mp_state = "connected";
-                        mp_status_message = "Player joined!";
-                        connected_player_name = _msg.playerName;
-                    }
-                    show_debug_message("Player joined: " + _msg.playerName);
-                    break;
-                    
-                case "player_left":
-                    global.ws_is_connected = false;
-                    
-                    if (instance_exists(global.ws_other_player)) {
-                        instance_destroy(global.ws_other_player);
-                        global.ws_other_player = noone;
-                    }
-                    
-                    with (obj_character_menu) {
-                        if (global.ws_is_host) {
-                            mp_state = "hosting";
-                            mp_status_message = "Player left";
-                        } else {
-                            mp_state = "idle";
-                            mp_status_message = "Host left";
-                            lobby_code = "";
-                        }
-                        connected_player_name = "";
-                    }
-                    show_debug_message("Player left");
-                    break;
-                    
-                case "game_data":
-                    var _data = _msg.data;
-                    
-                    if (_data.t == "pos") {
-                        if (instance_exists(global.ws_other_player)) {
-                            global.ws_other_player.target_x = _data.x;
-                            global.ws_other_player.target_y = _data.y;
-                            global.ws_other_player.aim_angle = _data.a;
-                            global.ws_other_player.sprite_index = _data.s;
-                            global.ws_other_player.image_xscale = _data.xs;
+                case 'game_data':
+                    const gameLobby = lobbies.get(ws.lobbyCode);
+                    if (gameLobby) {
+                        const target = ws.isHost ? gameLobby.guest : gameLobby.host;
+                        if (target && target.readyState === WebSocket.OPEN) {
+                            target.send(JSON.stringify({
+                                type: 'game_data',
+                                data: msg.data
+                            }));
                         }
                     }
-                    else if (_data.t == "bullet") {
-                        var _bullet = instance_create_layer(_data.x, _data.y, "Instances", obj_hero_bullet);
-                        _bullet.direction = _data.dir;
-                        _bullet.speed = 28;
-                        _bullet.image_angle = _data.dir;
-                        _bullet.image_xscale = 0.375;
-                        _bullet.image_yscale = 0.375;
-                        _bullet.from_network = true;
-                    }
+                    break;
+                    
+                case 'leave_lobby':
+                    leaveLobby(ws);
                     break;
             }
         } catch (e) {
-            show_debug_message("Parse error: " + string(e));
+            console.error('Error:', e);
         }
-        break;
-        
-    case network_type_disconnect:
-        global.ws_connected = false;
-        global.ws_is_connected = false;
-        global.ws_socket = -1;
-        
-        if (instance_exists(global.ws_other_player)) {
-            instance_destroy(global.ws_other_player);
-            global.ws_other_player = noone;
+    });
+    
+    ws.on('close', () => {
+        console.log('Client disconnected');
+        leaveLobby(ws);
+    });
+    
+    ws.on('error', (err) => {
+        console.error('WebSocket error:', err);
+    });
+});
+
+function leaveLobby(ws) {
+    if (ws.lobbyCode) {
+        const lobby = lobbies.get(ws.lobbyCode);
+        if (lobby) {
+            const other = ws.isHost ? lobby.guest : lobby.host;
+            if (other && other.readyState === WebSocket.OPEN) {
+                other.send(JSON.stringify({ type: 'player_left' }));
+                other.lobbyCode = null;
+            }
+            lobbies.delete(ws.lobbyCode);
+            console.log(`Lobby closed: ${ws.lobbyCode}`);
         }
-        
-        with (obj_character_menu) {
-            mp_state = "idle";
-            mp_status_message = "Disconnected";
-            connected_player_name = "";
-            lobby_code = "";
-        }
-        show_debug_message("Disconnected from server");
-        break;
+        ws.lobbyCode = null;
+    }
 }
+
+// Listen on 0.0.0.0 so Fly.io can reach it
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`WebSocket Relay server running on 0.0.0.0:${PORT}`);
+});

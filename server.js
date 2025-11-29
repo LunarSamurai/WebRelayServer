@@ -1,10 +1,25 @@
 const dgram = require('dgram');
-const server = dgram.createSocket('udp4');
+const http = require('http');
 
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
+const UDP_PORT = 5000;
+
+// === HTTP SERVER (for Fly.io health checks) ===
+const httpServer = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Game Matchmaker Server Running\n');
+});
+
+httpServer.listen(PORT, () => {
+    console.log(`HTTP health check server running on port ${PORT}`);
+});
+
+// === UDP MATCHMAKING SERVER ===
+const udpServer = dgram.createSocket('udp4');
+
 const lobbies = new Map();
 
-server.on('message', (msg, rinfo) => {
+udpServer.on('message', (msg, rinfo) => {
     try {
         const data = JSON.parse(msg.toString());
         const clientAddr = `${rinfo.address}:${rinfo.port}`;
@@ -13,17 +28,16 @@ server.on('message', (msg, rinfo) => {
         
         switch (data.type) {
             case 'create':
-                // Generate lobby code
                 const code = Math.random().toString(36).substring(2, 8).toUpperCase();
                 
                 lobbies.set(code, {
                     host: { ip: rinfo.address, port: rinfo.port, name: data.name },
-                    guest: null
+                    guest: null,
+                    created: Date.now()
                 });
                 
-                // Send code back to host
                 const response = JSON.stringify({ type: 'created', code: code });
-                server.send(response, rinfo.port, rinfo.address);
+                udpServer.send(response, rinfo.port, rinfo.address);
                 
                 console.log(`Lobby created: ${code}`);
                 break;
@@ -33,20 +47,18 @@ server.on('message', (msg, rinfo) => {
                 
                 if (!lobby) {
                     const err = JSON.stringify({ type: 'error', msg: 'Lobby not found' });
-                    server.send(err, rinfo.port, rinfo.address);
+                    udpServer.send(err, rinfo.port, rinfo.address);
                     return;
                 }
                 
                 if (lobby.guest) {
                     const err = JSON.stringify({ type: 'error', msg: 'Lobby full' });
-                    server.send(err, rinfo.port, rinfo.address);
+                    udpServer.send(err, rinfo.port, rinfo.address);
                     return;
                 }
                 
-                // Store guest info
                 lobby.guest = { ip: rinfo.address, port: rinfo.port, name: data.name };
                 
-                // Send peer info to both players
                 // Tell guest about host
                 const toGuest = JSON.stringify({
                     type: 'peer',
@@ -54,7 +66,7 @@ server.on('message', (msg, rinfo) => {
                     port: lobby.host.port,
                     name: lobby.host.name
                 });
-                server.send(toGuest, rinfo.port, rinfo.address);
+                udpServer.send(toGuest, rinfo.port, rinfo.address);
                 
                 // Tell host about guest
                 const toHost = JSON.stringify({
@@ -63,7 +75,7 @@ server.on('message', (msg, rinfo) => {
                     port: lobby.guest.port,
                     name: lobby.guest.name
                 });
-                server.send(toHost, lobby.host.port, lobby.host.ip);
+                udpServer.send(toHost, lobby.host.port, lobby.host.ip);
                 
                 console.log(`Peer exchange for lobby: ${data.code}`);
                 
@@ -72,9 +84,8 @@ server.on('message', (msg, rinfo) => {
                 break;
                 
             case 'ping':
-                // Keep-alive
                 const pong = JSON.stringify({ type: 'pong' });
-                server.send(pong, rinfo.port, rinfo.address);
+                udpServer.send(pong, rinfo.port, rinfo.address);
                 break;
         }
     } catch (e) {
@@ -82,8 +93,19 @@ server.on('message', (msg, rinfo) => {
     }
 });
 
-server.on('listening', () => {
-    console.log(`UDP Matchmaking server running on port ${PORT}`);
+udpServer.on('listening', () => {
+    console.log(`UDP Matchmaking server running on port ${UDP_PORT}`);
 });
 
-server.bind(PORT);
+// Clean up old lobbies every minute
+setInterval(() => {
+    const now = Date.now();
+    for (const [code, lobby] of lobbies) {
+        if (now - lobby.created > 300000) { // 5 minutes
+            lobbies.delete(code);
+            console.log(`Cleaned up old lobby: ${code}`);
+        }
+    }
+}, 60000);
+
+udpServer.bind(UDP_PORT);

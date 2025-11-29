@@ -3,13 +3,11 @@ const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 3000;
 
-// Create HTTP server
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('Game Relay Server Running\n');
 });
 
-// Create WebSocket server
 const wss = new WebSocket.Server({ server });
 
 const lobbies = new Map();
@@ -133,7 +131,6 @@ function leaveLobby(ws) {
     }
 }
 
-// Listen on 0.0.0.0 so Fly.io can reach it
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`WebSocket Relay server running on 0.0.0.0:${PORT}`);
 });
